@@ -137,6 +137,7 @@ return view.extend({
 		o = s.option(form.ListValue, 'mode', _('Line mode'));
 		o.default = '';
 		o.value('', _('Driver default'));
+		o.value('gpon', _('GPON'));
 		o.value('xgpon', _('XG-PON'));
 		o.value('xgspon', _('XGS-PON'));
 		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
@@ -147,6 +148,7 @@ return view.extend({
 		o.rmempty = true;
 		o.validate = validateSerialNumber;
 		o.depends('mode', '');
+		o.depends('mode', 'gpon');
 		o.depends('mode', 'xgpon');
 		o.depends('mode', 'xgspon');
 
@@ -154,6 +156,7 @@ return view.extend({
 		o.password = true;
 		o.rmempty = true;
 		o.depends('mode', '');
+		o.depends('mode', 'gpon');
 		o.depends('mode', 'xgpon');
 		o.depends('mode', 'xgspon');
 		o.validate = asciiLength(1, 36);
