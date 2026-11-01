@@ -161,6 +161,47 @@ copy_config() {
 	done
 }
 
+# 全链路取证：pon-trace 受 /sys/module/airoha_xpon/parameters/pon_trace 掩码控制，
+# pon-fail 不受掩码控制；汇总按 seg+stage 计数，用于先定位断在八段里的哪一段。
+capture_trace_state() {
+	local directory="$1"
+	local awk_program
+
+	mkdir -p "$directory"
+	write_command "$directory/pon-trace-mask.txt" \
+		cat /sys/module/airoha_xpon/parameters/pon_trace
+	write_shell_command "$directory/pon-trace.txt" \
+		"dmesg | grep -E 'pon-trace:' || true"
+	write_shell_command "$directory/pon-fail.txt" \
+		"dmesg | grep -E 'pon-fail:' || true"
+
+	awk_program='{
+		kind = ($0 ~ /pon-fail:/) ? "fail" : "trace"
+		seg = ""
+		stage = ""
+		for (i = 1; i <= NF; i++) {
+			field = $i
+			if (field ~ /^seg=/) {
+				sub(/^seg=/, "", field)
+				seg = field
+			} else if (field ~ /^stage=/) {
+				sub(/^stage=/, "", field)
+				stage = field
+			}
+		}
+		count[kind " seg=" seg " stage=" stage]++
+	}
+	END {
+		for (key in count)
+			printf "%4d %s\n", count[key], key
+	}'
+
+	{
+		printf '# command: dmesg | grep -E "pon-trace:|pon-fail:" | awk seg+stage counter | sort -k2\n'
+		dmesg | grep -E 'pon-trace:|pon-fail:' | awk "$awk_program" | sort -k2
+	} > "$directory/pon-trace-summary.txt" 2>&1
+}
+
 collect_bundle() {
 	local size result
 
@@ -203,6 +244,7 @@ collect_bundle() {
 		"grep -Ei 'pon|xgpon|epon|airoha' /proc/interrupts || true"
 	write_command "$WORK_DIR/dmesg.txt" dmesg
 	write_command "$WORK_DIR/logread.txt" logread
+	capture_trace_state "$WORK_DIR"
 	capture_bridge_state
 
 	if [ -d "$CAPTURE_DIR" ]; then
@@ -407,6 +449,7 @@ snapshot_before_restart() {
 	config_foreach capture_omci_state omci
 	config_foreach capture_oam_state oam
 	write_command "$WORK_DIR/dmesg.txt" dmesg
+	capture_trace_state "$WORK_DIR"
 }
 
 add_control_capture() {
