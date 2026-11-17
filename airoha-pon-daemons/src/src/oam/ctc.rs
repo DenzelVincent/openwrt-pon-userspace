@@ -477,7 +477,7 @@ impl CtcSession {
         }
 
         match leaf {
-LEAF_ONU_SN if object.is_none() => Ok(onu_sn(config, source_mac)),
+            LEAF_ONU_SN if object.is_none() => Ok(onu_sn(config, source_mac)),
             LEAF_FIRMWARE_VERSION if object.is_none() => {
                 Ok(config.firmware_version.iter().copied().take(127).collect())
             }
