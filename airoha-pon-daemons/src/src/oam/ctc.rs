@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::{fixed_width, fixed_width_right, OamConfig};
 use crate::wire::{Reader, Writer};
@@ -39,6 +39,9 @@ const LEAF_VLAN: u16 = 0x0021;
 const SET_OK: u8 = 0x80;
 const BAD_PARAMETERS: u8 = 0x86;
 const NO_RESOURCE: u8 = 0x87;
+
+// OLT 按对象实例下发 VLAN 规则，必须保留每个实例而不是只记最后一次 Set。
+const MAX_VLAN_OBJECTS: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DiscoveryState {
@@ -95,7 +98,8 @@ pub struct CtcSession {
     get_requests: u64,
     set_requests: u64,
     unsupported_requests: u64,
-    vlan: Option<VlanConfiguration>,
+    vlan: BTreeMap<u32, VlanConfiguration>,
+    vlan_last: Option<u32>,
 }
 
 impl CtcSession {
@@ -108,7 +112,8 @@ impl CtcSession {
             get_requests: 0,
             set_requests: 0,
             unsupported_requests: 0,
-            vlan: None,
+            vlan: BTreeMap::new(),
+            vlan_last: None,
         }
     }
 
@@ -238,6 +243,15 @@ impl CtcSession {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        // 标量字段描述 OLT 最后触碰的实例，ID 列表取所有已配置实例的去重并集。
+        let last = self.vlan_last.and_then(|index| self.vlan.get(&index));
+        let vlan_ids = self
+            .vlan
+            .values()
+            .flat_map(vlan_ids)
+            .collect::<BTreeSet<u16>>()
+            .into_iter()
+            .collect();
         Snapshot {
             discovery_state: match self.state {
                 DiscoveryState::PassiveWait => "passive-wait",
@@ -250,12 +264,9 @@ impl CtcSession {
             get_requests: self.get_requests,
             set_requests: self.set_requests,
             unsupported_requests: self.unsupported_requests,
-            vlan_object: self
-                .vlan
-                .as_ref()
-                .map(|configuration| configuration.object_index),
-            vlan_mode: self.vlan.as_ref().map(|configuration| configuration.mode),
-            vlan_ids: self.vlan.as_ref().map(vlan_ids).unwrap_or_default(),
+            vlan_object: last.map(|configuration| configuration.object_index),
+            vlan_mode: last.map(|configuration| configuration.mode),
+            vlan_ids,
         }
     }
 
@@ -526,12 +537,20 @@ impl CtcSession {
             _ => return BAD_PARAMETERS,
         };
 
-        // The HGU data path preserves OLT-provisioned tags for Linux VLAN and netifd policy.
-        self.vlan = Some(VlanConfiguration {
-            object_index: object.index,
-            mode,
-            raw: value.to_vec(),
-        });
+        // HGU 数据面保留 OLT 下发的标签，供 Linux VLAN 与 netifd 策略使用。
+        // 每个 CTC 对象实例承载一条规则；重复 Set 只替换同一实例。
+        if !self.vlan.contains_key(&object.index) && self.vlan.len() >= MAX_VLAN_OBJECTS {
+            return NO_RESOURCE;
+        }
+        self.vlan.insert(
+            object.index,
+            VlanConfiguration {
+                object_index: object.index,
+                mode,
+                raw: value.to_vec(),
+            },
+        );
+        self.vlan_last = Some(object.index);
         SET_OK
     }
 }
@@ -690,6 +709,63 @@ mod tests {
              length=5 result=0x80 value=0100000064"
         );
         assert_eq!(session.snapshot().vlan_ids, vec![100]);
+    }
+
+    // 构造 OLT 使用的 branch V1 单标签 VLAN Set。
+    fn vlan_set(index: u8, mode: u8, tag: u16) -> Vec<u8> {
+        vec![
+            OBJECT_BRANCH_V1,
+            0x00,
+            0x01,
+            0x01,
+            index,
+            EXTENDED_ATTRIBUTE,
+            0x00,
+            0x21,
+            0x05,
+            mode,
+            0x81,
+            0x00,
+            (tag >> 8) as u8,
+            tag as u8,
+        ]
+    }
+
+    #[test]
+    fn vlan_sets_keep_every_object_instance() {
+        let mut session = CtcSession::new();
+
+        for (index, tag) in [(1u8, 140u16), (2, 4092), (3, 4092)] {
+            let request = vlan_set(index, 1, tag);
+            session.handle_set(&request).expect("valid VLAN SET");
+        }
+
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.vlan_ids, vec![140, 4092]);
+        assert_eq!(snapshot.vlan_object, Some(3));
+        assert_eq!(snapshot.vlan_mode, Some(1));
+    }
+
+    #[test]
+    fn repeated_set_replaces_one_instance_only() {
+        let mut session = CtcSession::new();
+        session.handle_set(&vlan_set(1, 1, 140)).expect("first SET");
+        session.handle_set(&vlan_set(2, 1, 4092)).expect("second SET");
+        session.handle_set(&vlan_set(1, 1, 130)).expect("re-SET of instance 1");
+
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.vlan_ids, vec![130, 4092]);
+    }
+
+    #[test]
+    fn transparent_instance_publishes_no_ids() {
+        let mut session = CtcSession::new();
+        session.handle_set(&vlan_set(1, 1, 140)).expect("tagged SET");
+        session.handle_set(&vlan_set(2, 0, 140)).expect("transparent SET");
+
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.vlan_ids, vec![140]);
+        assert_eq!(snapshot.vlan_mode, Some(0));
     }
 
     #[test]
