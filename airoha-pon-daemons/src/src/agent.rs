@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 use std::env;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -115,9 +116,23 @@ fn run_control(line: &str, request: &str) -> io::Result<()> {
     }
 }
 
+fn write_oom_score_adj(path: &Path, adjustment: i32) -> io::Result<()> {
+    fs::write(path, format!("{adjustment}\n"))
+}
+
+fn protect_from_oom() {
+    // procd 每次 respawn 都会重新 exec，因此由进程在每次启动时设置。
+    if let Err(error) = write_oom_score_adj(Path::new("/proc/self/oom_score_adj"), -1000) {
+        eprintln!("warning: cannot lower airoha-pond OOM score: {error}");
+    }
+}
+
 fn execute_daemon(arguments: &[String]) -> io::Result<()> {
     match arguments {
-        [flag, line] if flag == "--line" => run_line(Path::new("/etc/config/pon"), line),
+        [flag, line] if flag == "--line" => {
+            protect_from_oom();
+            run_line(Path::new("/etc/config/pon"), line)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "usage: airoha-pond --line NAME",
@@ -197,6 +212,17 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_oom_score_adjustment_with_newline() {
+        let path = std::env::temp_dir().join(format!(
+            "airoha-pond-oom-{}.test",
+            std::process::id()
+        ));
+        write_oom_score_adj(&path, -1000).expect("write OOM score");
+        assert_eq!(fs::read_to_string(&path).expect("read OOM score"), "-1000\n");
+        fs::remove_file(path).expect("remove OOM fixture");
+    }
 
     #[test]
     fn selects_oam_for_epon_modes() {
