@@ -2,7 +2,7 @@
 
 起始：2026-11-15
 上游：`pbs05/openwrt-pon-userspace`，对比基准 `upstream/main a903fcc`（2026-11-16，2026-11-24 拉取）。
-重建基线：`main 2c979206e4`（2026-11-28）；旧 bugfix 保存在 `backup/bugfix-pre-rebuild-20261128`，本轮不恢复旧功能。
+重建基线：`main 2c979206e4`（2026-11-28）；本轮不恢复旧功能。
 范围：本分支记录相对上游与相对主分支的优化；驱动侧见 `openwrt-pon-drivers` 台账，固件侧见 PonWrt 台账。
 
 记录规范：
